@@ -26,9 +26,10 @@
     .trend{height:280px}
     canvas{width:100%;height:100%}
     footer{color:var(--sub);font-size:12px;margin-top:10px;line-height:1.5}
+    .notice{margin-bottom:10px}
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
 </head>
 <body>
   <div class="wrap">
@@ -43,6 +44,8 @@
         <button id="modeBtn" title="Przełącz między danymi LIVE (CoinGecko) a DEMO">Tryb: DEMO</button>
       </div>
     </header>
+
+    <div id="notice" class="pill notice" style="display:none"></div>
 
     <div class="card">
       <div class="kpi" style="margin-bottom:8px">
@@ -65,21 +68,22 @@
   </div>
 
   <script>
-    // --- CoinGecko API key (Demo) ---
-    // Nie musisz commitować klucza do repo. Możesz przekazać go w URL: ?key=TWÓJ_KLUCZ
-    // albo wstawić na stałe poniżej.
+    // --- CoinGecko API key (opcjonalny) ---
+    // Przekaż w URL: ?key=TWÓJ_KLUCZ (nie musisz go commitować)
     const CG_KEY = (new URL(location.href)).searchParams.get('key') || '';
     function withKey(url){
-      if(!CG_KEY) return url; // spróbuj bez klucza (może zadziałać), ale CG może blokować
+      if(!CG_KEY) return url; // spróbuj bez klucza; jeśli 401/403, użyj proxy/klucz
       const hasQ = url.includes('?');
       const sep = hasQ ? '&' : '?';
       return url + sep + 'x_cg_demo_api_key=' + encodeURIComponent(CG_KEY);
     }
+
     const elGrid = document.getElementById('grid');
     const elAvg = document.getElementById('avgProgress');
     const elUpdated = document.getElementById('lastUpdated');
     const btnRefresh = document.getElementById('refreshBtn');
     const btnMode = document.getElementById('modeBtn');
+    const elNotice = document.getElementById('notice');
 
     let MODE = 'DEMO'; // 'DEMO' | 'LIVE'
     let chart;
@@ -126,10 +130,10 @@
               <div class="small">${it.label}</div>
               <h3>${fmt(it.value)}</h3>
             </div>
-            <div class="small" style="color:${pctColor(it.progress)}">${Math.round(it.progress)}%</div>
+            <div class="small" style="color:${pctColor(it.progress||0)}">${Math.round(it.progress||0)}%</div>
           </div>
           <div class="tag">Próg szczytu: ${it.target}</div>
-          <div class="bar" style="margin:8px 0 6px"><div style="width:${Math.min(100, Math.max(0,it.progress))}%"></div></div>
+          <div class="bar" style="margin:8px 0 6px"><div style="width:${Math.min(100, Math.max(0,it.progress||0))}%"></div></div>
           <div class="small">${it.hint||''}</div>
         `;
         elGrid.appendChild(card);
@@ -140,16 +144,15 @@
     async function fetchCoinGeckoDaily(days=800){
       const url = withKey(`https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=${days}&interval=daily`);
       const r = await fetch(url);
-      if(!r.ok) throw new Error('CoinGecko error');
+      if(!r.ok) throw new Error('CoinGecko daily error: '+r.status);
       const j = await r.json();
-      // j.prices: [timestamp, price]
       return j.prices.map(p=>({ time: new Date(p[0]), close: p[1] }));
     }
 
     async function fetchCoinGeckoHourly(days=3){
       const url = withKey(`https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=${days}&interval=hourly`);
       const r = await fetch(url);
-      if(!r.ok) throw new Error('CoinGecko error');
+      if(!r.ok) throw new Error('CoinGecko hourly error: '+r.status);
       const j = await r.json();
       return j.prices.map(p=>({ time: new Date(p[0]), close: p[1] }));
     }
@@ -159,8 +162,10 @@
     }
 
     function rsi(closes, period=22){
-      let gains=0, losses=0; const rsiv=[];
-      rsiv.length = closes.length; rsiv.fill(null);
+      if(closes.length < period+2){
+        const tmp = new Array(closes.length).fill(null); return tmp;
+      }
+      let gains=0, losses=0; const rsiv = new Array(closes.length).fill(null);
       for(let i=1;i<=period;i++){ const d=closes[i]-closes[i-1]; if(d>=0) gains+=d; else losses-=d; }
       let avgG=gains/period, avgL=losses/period; rsiv[period]= 100 - (100/(1+(avgG/(avgL||1e-9))));
       for(let i=period+1;i<closes.length;i++){
@@ -188,7 +193,7 @@
       const vMa730 = ma730[last];
 
       // AHR999 (uproszczone): price / MA200; próg=4
-      const ahr = vMa200 ? (price / vMa200) : null;
+      const ahr = (vMa200 && price)? (price / vMa200) : null;
       const ahrProgress = ahr? Math.min(100, (ahr/4)*100) : 0;
 
       // Pi Top (uprość): PiTop = 2 * MA350. Progress = price/PiTop
@@ -220,20 +225,33 @@
     }
 
     function buildTrend(seriesHourly, seriesDaily){
-      const price3d = seriesHourly.map(s=>({x:s.time, y:s.close}));
+      const ctx = document.getElementById('trendChart').getContext('2d');
+      if(!seriesHourly || !Array.isArray(seriesHourly) || seriesHourly.length===0){
+        // fallback DEMO trend
+        const labels = Array.from({length:72}).map((_,i)=>new Date(Date.now()- (72-i)*60*60*1000));
+        const data = DEMO.trend;
+        if(chart) chart.destroy();
+        chart = new Chart(ctx, { type:'line', data:{ datasets:[
+          {label:'BTC Price (USD, godz.)', data: labels.map((t,i)=>({x:t,y:data[i].price})), yAxisID:'y1', pointRadius:0, borderWidth:2},
+          {label:'RSI (22d, dziennie)', data: [0,1,2].map(j=>({x: new Date(Date.now()-(2-j)*86400000), y: 60 + j*2})), yAxisID:'y2', pointRadius:3, borderWidth:2},
+          {label:'MVRV (DEMO)', data: labels.map(t=>({x:t,y:2.5})), yAxisID:'y3', pointRadius:0, borderWidth:1}
+        ]}, options:{responsive:true, interaction:{mode:'nearest',intersect:false}, scales:{x:{type:'time',time:{unit:'hour'}}, y1:{display:false}, y2:{position:'right',min:0,max:100,grid:{display:false}}, y3:{display:false}}, plugins:{legend:{labels:{color:'#e6e8ef'}}}} });
+        return;
+      }
+
+      const price3h = seriesHourly.map(s=>({x:s.time, y:s.close}));
       const closesDaily = seriesDaily.map(s=>s.close);
       const rsiSeries = rsi(closesDaily,22);
-      const rsiLast72 = rsiSeries.slice(-3); // 3 ostatnie punkty (dni)
-      // Wykres: cena (godzinowa), RSI (ostatnie 3 dni, rzutowane), MVRV (DEMO linia stała)
-      const ctx = document.getElementById('trendChart').getContext('2d');
+      const rsiLast3 = rsiSeries.slice(-3);
+
       if(chart) chart.destroy();
       chart = new Chart(ctx, {
         type:'line',
         data:{
           datasets:[
-            {label:'BTC Price (USD, godz.)', data: price3d.map(p=>({x:p.x, y:p.y})), yAxisID:'y1', pointRadius:0, borderWidth:2},
-            {label:'RSI (22d, dziennie)', data: rsiLast72.map((v,i)=>({x: new Date(Date.now()-(2-i)*86400000), y: v??null})), yAxisID:'y2', pointRadius:3, borderWidth:2},
-            {label:'MVRV (DEMO)', data: price3d.map(p=>({x:p.x, y:2.5})), yAxisID:'y3', pointRadius:0, borderWidth:1}
+            {label:'BTC Price (USD, godz.)', data: price3h, yAxisID:'y1', pointRadius:0, borderWidth:2},
+            {label:'RSI (22d, dziennie)', data: rsiLast3.map((v,i)=>({x: new Date(Date.now()-(2-i)*86400000), y: v??null})), yAxisID:'y2', pointRadius:3, borderWidth:2},
+            {label:'MVRV (DEMO)', data: price3h.map(p=>({x:p.x, y:2.5})), yAxisID:'y3', pointRadius:0, borderWidth:1}
           ]
         },
         options:{
@@ -245,25 +263,44 @@
             y2:{type:'linear', position:'right', min:0, max:100, grid:{display:false}},
             y3:{type:'linear', position:'right', display:false}
           },
-          plugins:{legend:{labels:{color:'#e6e8ef'}}, tooltip:{},}
+          plugins:{legend:{labels:{color:'#e6e8ef'}}, tooltip:{}}
         }
       });
     }
 
     async function refresh(){
       btnRefresh.disabled = true;
+      elNotice.style.display = 'none';
       try{
         let indicators, seriesDaily, seriesHourly;
         if(MODE==='LIVE'){
-          seriesDaily = await fetchCoinGeckoDaily(800);
-          seriesHourly = await fetchCoinGeckoHourly(3);
-          indicators = buildLiveIndicators(seriesDaily);
-          // render cards first so ewentualny błąd wykresu nie blokuje UI
-          renderCards(indicators);
-          // wykres w try/catch – jeśli adapter czasu nie zadziała, reszta działa
-          try { buildTrend(seriesHourly, seriesDaily); } catch(e) { console.warn('Chart error', e); }
-        
-    
+          try{
+            seriesDaily = await fetchCoinGeckoDaily(800);
+            seriesHourly = await fetchCoinGeckoHourly(3);
+            indicators = buildLiveIndicators(seriesDaily);
+            buildTrend(seriesHourly, seriesDaily);
+          } catch (err){
+            console.warn('LIVE fetch failed, fallback to DEMO:', err);
+            elNotice.textContent = 'LIVE: problem z CoinGecko ('+err.message+'). Pokazuję DEMO.';
+            elNotice.style.display = 'inline-flex';
+            indicators = DEMO.indicators;
+            buildTrend(null, null);
+          }
+        } else {
+          indicators = DEMO.indicators;
+          buildTrend(null, null);
+        }
+        renderCards(indicators);
+        elUpdated.textContent = nowStr();
+      }catch(e){
+        console.error(e);
+        elNotice.textContent = 'Błąd odświeżania: '+e.message;
+        elNotice.style.display = 'inline-flex';
+      }finally{
+        btnRefresh.disabled = false;
+      }
+    }
+
     btnRefresh.addEventListener('click', refresh);
     btnMode.addEventListener('click', ()=>{
       MODE = MODE==='DEMO' ? 'LIVE' : 'DEMO';
@@ -276,4 +313,3 @@
   </script>
 </body>
 </html>
-
