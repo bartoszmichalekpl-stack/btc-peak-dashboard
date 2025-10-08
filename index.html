@@ -28,6 +28,7 @@
     footer{color:var(--sub);font-size:12px;margin-top:10px;line-height:1.5}
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 </head>
 <body>
   <div class="wrap">
@@ -64,6 +65,16 @@
   </div>
 
   <script>
+    // --- CoinGecko API key (Demo) ---
+    // Nie musisz commitować klucza do repo. Możesz przekazać go w URL: ?key=TWÓJ_KLUCZ
+    // albo wstawić na stałe poniżej.
+    const CG_KEY = (new URL(location.href)).searchParams.get('key') || '';
+    function withKey(url){
+      if(!CG_KEY) return url; // spróbuj bez klucza (może zadziałać), ale CG może blokować
+      const hasQ = url.includes('?');
+      const sep = hasQ ? '&' : '?';
+      return url + sep + 'x_cg_demo_api_key=' + encodeURIComponent(CG_KEY);
+    }
     const elGrid = document.getElementById('grid');
     const elAvg = document.getElementById('avgProgress');
     const elUpdated = document.getElementById('lastUpdated');
@@ -127,7 +138,7 @@
 
     // ---------- Live data (CoinGecko) ----------
     async function fetchCoinGeckoDaily(days=800){
-      const url = `https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=${days}&interval=daily`;
+      const url = withKey(`https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=${days}&interval=daily`);
       const r = await fetch(url);
       if(!r.ok) throw new Error('CoinGecko error');
       const j = await r.json();
@@ -136,7 +147,7 @@
     }
 
     async function fetchCoinGeckoHourly(days=3){
-      const url = `https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=${days}&interval=hourly`;
+      const url = withKey(`https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=${days}&interval=hourly`);
       const r = await fetch(url);
       if(!r.ok) throw new Error('CoinGecko error');
       const j = await r.json();
@@ -247,30 +258,12 @@
           seriesDaily = await fetchCoinGeckoDaily(800);
           seriesHourly = await fetchCoinGeckoHourly(3);
           indicators = buildLiveIndicators(seriesDaily);
-          buildTrend(seriesHourly, seriesDaily);
-        } else {
-          indicators = DEMO.indicators;
-          // build mock trend
-          const labels = Array.from({length:72}).map((_,i)=>new Date(Date.now()- (72-i)*60*60*1000));
-          const data = DEMO.trend;
-          const ctx = document.getElementById('trendChart').getContext('2d');
-          if(chart) chart.destroy();
-          chart = new Chart(ctx, { type:'line', data:{ datasets:[
-            {label:'BTC Price (USD, godz.)', data: labels.map((t,i)=>({x:t,y:data[i].price})), yAxisID:'y1', pointRadius:0, borderWidth:2},
-            {label:'RSI (22d, dziennie)', data: [0,1,2].map(j=>({x: new Date(Date.now()-(2-j)*86400000), y: 60 + j*2})), yAxisID:'y2', pointRadius:3, borderWidth:2},
-            {label:'MVRV (DEMO)', data: labels.map(t=>({x:t,y:2.5})), yAxisID:'y3', pointRadius:0, borderWidth:1}
-          ]}, options:{responsive:true, interaction:{mode:'nearest',intersect:false}, scales:{x:{type:'time',time:{unit:'hour'}}, y1:{display:false}, y2:{position:'right',min:0,max:100,grid:{display:false}}, y3:{display:false}}, plugins:{legend:{labels:{color:'#e6e8ef'}}}} });
-        }
-        renderCards(indicators);
-        elUpdated.textContent = nowStr();
-      }catch(e){
-        console.error(e);
-        alert('Błąd odświeżania: '+e.message);
-      }finally{
-        btnRefresh.disabled = false;
-      }
-    }
-
+          // render cards first so ewentualny błąd wykresu nie blokuje UI
+          renderCards(indicators);
+          // wykres w try/catch – jeśli adapter czasu nie zadziała, reszta działa
+          try { buildTrend(seriesHourly, seriesDaily); } catch(e) { console.warn('Chart error', e); }
+        
+    
     btnRefresh.addEventListener('click', refresh);
     btnMode.addEventListener('click', ()=>{
       MODE = MODE==='DEMO' ? 'LIVE' : 'DEMO';
@@ -283,3 +276,4 @@
   </script>
 </body>
 </html>
+
