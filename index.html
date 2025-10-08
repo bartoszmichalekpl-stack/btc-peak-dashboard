@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BTC Peak Indicators – Dashboard</title>
+  <style>
+    :root{--bg:#0f1115;--card:#171a21;--muted:#222633;--text:#e6e8ef;--sub:#9aa3b2;--ok:#2bc48a;--warn:#f5b301;--alert:#f55454;--primary:#6ea8fe}
+    *{box-sizing:border-box}
+    body{margin:0;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;background:var(--bg);color:var(--text)}
+    .wrap{max-width:1100px;margin:24px auto;padding:0 16px}
+    header{display:flex;gap:16px;align-items:center;justify-content:space-between;margin-bottom:16px}
+    h1{font-size:22px;margin:0}
+    .row{display:flex;gap:12px;flex-wrap:wrap}
+    .pill{background:var(--muted);padding:6px 10px;border-radius:999px;font-size:12px;display:inline-flex;gap:8px;align-items:center}
+    button{background:#2b3345;color:#fff;border:1px solid #384057;border-radius:10px;padding:8px 12px;font-size:14px;cursor:pointer}
+    button:disabled{opacity:.6;cursor:not-allowed}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+    .card{background:var(--card);border:1px solid #23283a;border-radius:16px;padding:14px}
+    .small{font-size:12px;color:var(--sub)}
+    .kpi{display:flex;align-items:flex-start;justify-content:space-between}
+    .kpi h3{margin:2px 0 0 0;font-size:20px}
+    .bar{height:8px;background:var(--muted);border-radius:999px;overflow:hidden}
+    .bar>div{height:100%;background:var(--primary)}
+    .tag{font-size:12px;color:var(--sub)}
+    .trend{height:280px}
+    canvas{width:100%;height:100%}
+    footer{color:var(--sub);font-size:12px;margin-top:10px;line-height:1.5}
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>BTC Peak Indicators – Dashboard</h1>
+        <div class="small">Ostatnia aktualizacja: <span id="lastUpdated">—</span></div>
+      </div>
+      <div class="row">
+        <div class="pill">Śr. przegrzanie: <b id="avgProgress">—</b></div>
+        <button id="refreshBtn">Odśwież</button>
+        <button id="modeBtn" title="Przełącz między danymi LIVE (CoinGecko) a DEMO">Tryb: DEMO</button>
+      </div>
+    </header>
+
+    <div class="card">
+      <div class="kpi" style="margin-bottom:8px">
+        <div>
+          <div class="small">Trendy 3-dniowe</div>
+          <div style="font-weight:600">Cena BTC, RSI(22d), MVRV (DEMO)</div>
+        </div>
+        <div class="small">MVRV/Puell/Bubble/ETF/USDT w LIVE = N/A bez płatnych/publicznych API</div>
+      </div>
+      <div class="trend"><canvas id="trendChart"></canvas></div>
+    </div>
+
+    <div id="grid" class="grid" style="margin-top:12px"></div>
+
+    <footer>
+      <p><b>Źródła bezpłatne (LIVE):</b> CoinGecko (cena/OHLC → RSI, MA111/350, MA200, 2Y MA, AHR999, PiTop), opcj. BlockchainCenter (Altseason), Farside/SoSoValue (ETF flows).<br>
+         <b>Źródła płatne:</b> Glassnode/CryptoQuant (MVRV Z-Score, Puell Multiple, część Bubble Index). Binance Earn API dla USDT APY (czasem wymaga klucza).</p>
+      <p>Tryb LIVE pobiera z CoinGecko i liczy lokalnie: <i>RSI(22), MA200, MA111, MA350, 2Y MA, AHR999, PiTop=2×MA350</i>. Pozostałe wskaźniki mają wartości DEMO lub N/A, dopóki nie podłączysz API.</p>
+    </footer>
+  </div>
+
+  <script>
+    const elGrid = document.getElementById('grid');
+    const elAvg = document.getElementById('avgProgress');
+    const elUpdated = document.getElementById('lastUpdated');
+    const btnRefresh = document.getElementById('refreshBtn');
+    const btnMode = document.getElementById('modeBtn');
+
+    let MODE = 'DEMO'; // 'DEMO' | 'LIVE'
+    let chart;
+
+    const DEMO = {
+      indicators: [
+        { key: 'ahr999', label: 'AHR999 Index', value: 1.16, target: '≥ 4.0', progress: 29, hint: 'Daleko od euforii' },
+        { key: 'pi', label: 'Pi Cycle Top (cena vs 2×MA350)', value: 124774, target: '~199,587', progress: 63, hint: 'W połowie drogi' },
+        { key: 'puell', label: 'Puell Multiple', value: 1.07, target: '≥ 2.2', progress: 49, hint: 'Górnicy spokojni (DEMO)' },
+        { key: 'rainbow', label: 'Rainbow Chart (level)', value: 3, target: '≥ 5', progress: 60, hint: 'Ekspansja, nie euforia (DEMO)' },
+        { key: 'etf_out', label: 'ETF Net Outflows (dni)', value: 0, target: '≥ 10', progress: 0, hint: 'Napływy trwają (DEMO)' },
+        { key: 'etf_ratio', label: 'ETF-to-BTC Ratio', value: 6.22, target: '≤ 3.5%', progress: 56, hint: 'Wysoki udział ETF (DEMO)' },
+        { key: 'ma2y', label: '2-Year MA Multiplier (cena / MA730)', value: 1.9, target: '≥ 5×', progress: 38, hint: 'Duży bufor (DEMO prog.)' },
+        { key: 'mvrv', label: 'MVRV Z-Score', value: 2.52, target: '≥ 5.0', progress: 50, hint: 'Umiarkowane przewartościowanie (DEMO)' },
+        { key: 'bubble', label: 'Bitcoin Bubble Index', value: 13.48, target: '≥ 80', progress: 17, hint: 'Brak euforii (DEMO)' },
+        { key: 'usdt', label: 'USDT Flexible Savings (APY)', value: 14.24, target: '≥ 29%', progress: 49, hint: 'DeFi umiarkowane (DEMO)' },
+        { key: 'rsi22', label: 'RSI (22d)', value: 64.13, target: '≥ 80', progress: 80, hint: 'Silny impet' },
+        { key: 'altseason', label: 'Altseason Index', value: 69, target: '≥ 75', progress: 92, hint: 'Blisko strefy altów (DEMO)' },
+      ],
+      trend: Array.from({length:72}).map((_,i)=>({t:i, price:110000+i*220+Math.sin(i/3)*800, rsi:58+Math.sin(i/8)*4+i*0.05, mvrv:2.2+Math.sin(i/10)*0.1+i*0.004}))
+    };
+
+    // ---------- Helpers ----------
+    const fmt = (v) => typeof v === 'number' ? v.toLocaleString('pl-PL') : v;
+    const nowStr = () => new Date().toLocaleString();
+    function pctColor(p){
+      if(p>=90) return 'var(--alert)';
+      if(p>=70) return 'var(--warn)';
+      return 'var(--ok)';
+    }
+
+    function renderCards(list){
+      elGrid.innerHTML = '';
+      let sum = 0; let n=0;
+      list.forEach(it=>{sum += (it.progress??0); n++;});
+      elAvg.textContent = Math.round(sum/Math.max(1,n))+'%';
+
+      list.forEach(it=>{
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.innerHTML = `
+          <div class="kpi">
+            <div>
+              <div class="small">${it.label}</div>
+              <h3>${fmt(it.value)}</h3>
+            </div>
+            <div class="small" style="color:${pctColor(it.progress)}">${Math.round(it.progress)}%</div>
+          </div>
+          <div class="tag">Próg szczytu: ${it.target}</div>
+          <div class="bar" style="margin:8px 0 6px"><div style="width:${Math.min(100, Math.max(0,it.progress))}%"></div></div>
+          <div class="small">${it.hint||''}</div>
+        `;
+        elGrid.appendChild(card);
+      })
+    }
+
+    // ---------- Live data (CoinGecko) ----------
+    async function fetchCoinGeckoDaily(days=800){
+      const url = `https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=${days}&interval=daily`;
+      const r = await fetch(url);
+      if(!r.ok) throw new Error('CoinGecko error');
+      const j = await r.json();
+      // j.prices: [timestamp, price]
+      return j.prices.map(p=>({ time: new Date(p[0]), close: p[1] }));
+    }
+
+    async function fetchCoinGeckoHourly(days=3){
+      const url = `https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=${days}&interval=hourly`;
+      const r = await fetch(url);
+      if(!r.ok) throw new Error('CoinGecko error');
+      const j = await r.json();
+      return j.prices.map(p=>({ time: new Date(p[0]), close: p[1] }));
+    }
+
+    function sma(arr, p){
+      const out=[]; let sum=0; for(let i=0;i<arr.length;i++){ sum+=arr[i]; if(i>=p) sum-=arr[i-p]; out.push(i>=p-1? sum/p : null); } return out;
+    }
+
+    function rsi(closes, period=22){
+      let gains=0, losses=0; const rsiv=[];
+      rsiv.length = closes.length; rsiv.fill(null);
+      for(let i=1;i<=period;i++){ const d=closes[i]-closes[i-1]; if(d>=0) gains+=d; else losses-=d; }
+      let avgG=gains/period, avgL=losses/period; rsiv[period]= 100 - (100/(1+(avgG/(avgL||1e-9))));
+      for(let i=period+1;i<closes.length;i++){
+        const d=closes[i]-closes[i-1]; const g=Math.max(0,d), l=Math.max(0,-d);
+        avgG = (avgG*(period-1)+g)/period; avgL = (avgL*(period-1)+l)/period;
+        rsiv[i]= 100 - (100/(1+(avgG/(avgL||1e-9))));
+      }
+      return rsiv;
+    }
+
+    function buildLiveIndicators(series){
+      const closes = series.map(s=>s.close);
+      const ma200 = sma(closes, 200);
+      const ma111 = sma(closes, 111);
+      const ma350 = sma(closes, 350);
+      const rsi22 = rsi(closes,22);
+      const ma730 = sma(closes, 730);
+
+      const last = closes.length-1;
+      const price = closes[last];
+      const vMa200 = ma200[last];
+      const vMa111 = ma111[last];
+      const vMa350 = ma350[last];
+      const vRsi22 = rsi22[last];
+      const vMa730 = ma730[last];
+
+      // AHR999 (uproszczone): price / MA200; próg=4
+      const ahr = vMa200 ? (price / vMa200) : null;
+      const ahrProgress = ahr? Math.min(100, (ahr/4)*100) : 0;
+
+      // Pi Top (uprość): PiTop = 2 * MA350. Progress = price/PiTop
+      const piTop = vMa350? 2*vMa350 : null;
+      const piProgress = (piTop && price)? Math.min(100, (price/piTop)*100) : 0;
+
+      // 2-Year MA Multiplier: mult = price / MA730; próg=5×
+      const mult2y = vMa730? (price / vMa730) : null;
+      const mult2yProgress = mult2y? Math.min(100, (mult2y/5)*100) : 0;
+
+      // RSI progress do 80
+      const rsiProgress = vRsi22? Math.min(100, (vRsi22/80)*100) : 0;
+
+      const live = [
+        { key:'ahr999', label:'AHR999 Index (cena/MA200)', value: ahr? ahr.toFixed(2):'N/A', target:'≥ 4.0', progress: ahrProgress, hint:'Do euforii daleko' },
+        { key:'pi', label:'Pi Cycle Top (cena vs 2×MA350)', value: price? price.toFixed(0):'N/A', target: piTop? ('~'+piTop.toFixed(0)):'N/A', progress: piProgress, hint:'Im bliżej 100%, tym bliżej topu' },
+        { key:'puell', label:'Puell Multiple', value:'N/A', target:'≥ 2.2', progress: 0, hint:'Wymaga on-chain (np. Glassnode)' },
+        { key:'rainbow', label:'Rainbow Chart (level)', value:'N/A', target:'≥ 5', progress: 0, hint:'Model log – opcjonalnie' },
+        { key:'etf_out', label:'ETF Net Outflows (dni)', value:'N/A', target:'≥ 10', progress: 0, hint:'Dodaj API Farside/SoSoValue' },
+        { key:'etf_ratio', label:'ETF-to-BTC Ratio', value:'N/A', target:'≤ 3.5%', progress: 0, hint:'Dodaj API ETF wolumenów' },
+        { key:'ma2y', label:'2-Year MA Multiplier (cena/MA730)', value: mult2y? mult2y.toFixed(2):'N/A', target:'≥ 5×', progress: mult2yProgress, hint:'Bufor do topu' },
+        { key:'mvrv', label:'MVRV Z-Score', value:'N/A', target:'≥ 5.0', progress: 0, hint:'Wymaga on-chain (np. Glassnode)' },
+        { key:'bubble', label:'Bitcoin Bubble Index', value:'N/A', target:'≥ 80', progress: 0, hint:'Syntetyk z wielu źródeł' },
+        { key:'usdt', label:'USDT Flexible Savings (APY)', value:'N/A', target:'≥ 29%', progress: 0, hint:'Dodaj Binance Earn API' },
+        { key:'rsi22', label:'RSI (22d)', value: vRsi22? vRsi22.toFixed(1):'N/A', target:'≥ 80', progress: rsiProgress, hint:'Momentum krótkoterminowe' },
+        { key:'altseason', label:'Altseason Index', value:'N/A', target:'≥ 75', progress: 0, hint:'Dodaj BlockchainCenter API' },
+      ];
+      return live;
+    }
+
+    function buildTrend(seriesHourly, seriesDaily){
+      const price3d = seriesHourly.map(s=>({x:s.time, y:s.close}));
+      const closesDaily = seriesDaily.map(s=>s.close);
+      const rsiSeries = rsi(closesDaily,22);
+      const rsiLast72 = rsiSeries.slice(-3); // 3 ostatnie punkty (dni)
+      // Wykres: cena (godzinowa), RSI (ostatnie 3 dni, rzutowane), MVRV (DEMO linia stała)
+      const ctx = document.getElementById('trendChart').getContext('2d');
+      if(chart) chart.destroy();
+      chart = new Chart(ctx, {
+        type:'line',
+        data:{
+          datasets:[
+            {label:'BTC Price (USD, godz.)', data: price3d.map(p=>({x:p.x, y:p.y})), yAxisID:'y1', pointRadius:0, borderWidth:2},
+            {label:'RSI (22d, dziennie)', data: rsiLast72.map((v,i)=>({x: new Date(Date.now()-(2-i)*86400000), y: v??null})), yAxisID:'y2', pointRadius:3, borderWidth:2},
+            {label:'MVRV (DEMO)', data: price3d.map(p=>({x:p.x, y:2.5})), yAxisID:'y3', pointRadius:0, borderWidth:1}
+          ]
+        },
+        options:{
+          responsive:true,
+          interaction:{mode:'nearest', intersect:false},
+          scales:{
+            x:{type:'time', time:{unit:'hour'}},
+            y1:{type:'linear', position:'left', display:false},
+            y2:{type:'linear', position:'right', min:0, max:100, grid:{display:false}},
+            y3:{type:'linear', position:'right', display:false}
+          },
+          plugins:{legend:{labels:{color:'#e6e8ef'}}, tooltip:{},}
+        }
+      });
+    }
+
+    async function refresh(){
+      btnRefresh.disabled = true;
+      try{
+        let indicators, seriesDaily, seriesHourly;
+        if(MODE==='LIVE'){
+          seriesDaily = await fetchCoinGeckoDaily(800);
+          seriesHourly = await fetchCoinGeckoHourly(3);
+          indicators = buildLiveIndicators(seriesDaily);
+          buildTrend(seriesHourly, seriesDaily);
+        } else {
+          indicators = DEMO.indicators;
+          // build mock trend
+          const labels = Array.from({length:72}).map((_,i)=>new Date(Date.now()- (72-i)*60*60*1000));
+          const data = DEMO.trend;
+          const ctx = document.getElementById('trendChart').getContext('2d');
+          if(chart) chart.destroy();
+          chart = new Chart(ctx, { type:'line', data:{ datasets:[
+            {label:'BTC Price (USD, godz.)', data: labels.map((t,i)=>({x:t,y:data[i].price})), yAxisID:'y1', pointRadius:0, borderWidth:2},
+            {label:'RSI (22d, dziennie)', data: [0,1,2].map(j=>({x: new Date(Date.now()-(2-j)*86400000), y: 60 + j*2})), yAxisID:'y2', pointRadius:3, borderWidth:2},
+            {label:'MVRV (DEMO)', data: labels.map(t=>({x:t,y:2.5})), yAxisID:'y3', pointRadius:0, borderWidth:1}
+          ]}, options:{responsive:true, interaction:{mode:'nearest',intersect:false}, scales:{x:{type:'time',time:{unit:'hour'}}, y1:{display:false}, y2:{position:'right',min:0,max:100,grid:{display:false}}, y3:{display:false}}, plugins:{legend:{labels:{color:'#e6e8ef'}}}} });
+        }
+        renderCards(indicators);
+        elUpdated.textContent = nowStr();
+      }catch(e){
+        console.error(e);
+        alert('Błąd odświeżania: '+e.message);
+      }finally{
+        btnRefresh.disabled = false;
+      }
+    }
+
+    btnRefresh.addEventListener('click', refresh);
+    btnMode.addEventListener('click', ()=>{
+      MODE = MODE==='DEMO' ? 'LIVE' : 'DEMO';
+      btnMode.textContent = 'Tryb: ' + MODE;
+      refresh();
+    });
+
+    // init
+    refresh();
+  </script>
+</body>
+</html>
